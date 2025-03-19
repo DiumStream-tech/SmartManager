@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using BepInEx;
 using Newtonsoft.Json;
@@ -10,110 +11,98 @@ namespace SmartManager.Manager
 {
     public static class TraductionsManager
     {
-        private static readonly string SmartModsFolder = Path.Combine(Paths.ConfigPath, "SmartMods");
-        private static readonly string LangueFolder = Path.Combine(SmartModsFolder, "SmartManager", "Langue");
+        private static readonly string LangueFolder = Path.Combine(Paths.ConfigPath, "SmartManager", "Langue");
         private static Dictionary<string, string> currentTranslations;
+        private static Dictionary<string, string> defaultTranslations;
 
         public static void Initialize()
         {
-            EnsureDirectoryExists(SmartModsFolder);
             EnsureDirectoryExists(LangueFolder);
-            VerifyAndUpdateLanguageFiles();
+            GenerateJsonFromCsClasses();
+            LoadDefaultLanguage();
+        }
+
+        private static void GenerateJsonFromCsClasses()
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            
+            foreach (var type in assembly.GetTypes()
+                .Where(t => t.Namespace == "Enhancer.Manager.Langue" && t.IsClass && t.IsAbstract && t.IsSealed))
+            {
+                try
+                {
+                    var langCode = type.Name.ToLower();
+                    var translations = type.GetField("Translations", BindingFlags.Public | BindingFlags.Static)?
+                        .GetValue(null) as Dictionary<string, string>;
+
+                    if (translations != null)
+                    {
+                        var jsonPath = Path.Combine(LangueFolder, $"{langCode}.json");
+                        File.WriteAllText(jsonPath, JsonConvert.SerializeObject(translations, Formatting.Indented));
+                        Debug.Log($"[SmartManager] Fichier JSON généré : {langCode}.json");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[SmartManager] Erreur de génération JSON : {ex.Message}");
+                }
+            }
+        }
+
+        private static void LoadDefaultLanguage()
+        {
+            var enPath = Path.Combine(LangueFolder, "en.json");
+            if (File.Exists(enPath))
+            {
+                defaultTranslations = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(enPath));
+            }
+            else
+            {
+                Debug.LogError("[SmartManager] Fichier de langue par défaut (en.json) introuvable !");
+                defaultTranslations = new Dictionary<string, string>();
+            }
         }
 
         public static void LoadTranslations(string language)
         {
-            string filePath = Path.Combine(LangueFolder, $"{language}.json");
-            
-            if (File.Exists(filePath))
+            var langCode = language.ToLower();
+            var jsonPath = Path.Combine(LangueFolder, $"{langCode}.json");
+
+            if (File.Exists(jsonPath))
             {
-                string json = File.ReadAllText(filePath);
-                currentTranslations = JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
-                Debug.Log($"[SmartManager] Traductions chargées : {language}");
+                try
+                {
+                    currentTranslations = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(jsonPath));
+                    Debug.Log($"[SmartManager] Langue chargée : {langCode}");
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[SmartManager] Erreur de chargement {langCode}.json : {ex.Message}");
+                    currentTranslations = defaultTranslations;
+                }
             }
             else
             {
-                Debug.LogWarning($"[SmartManager] Fichier de langue introuvable : {language}.json. Utilisation de l'anglais par défaut.");
-                currentTranslations = LoadEmbeddedTranslations("en");
+                Debug.LogWarning($"[SmartManager] Fichier {langCode}.json introuvable, utilisation de l'anglais");
+                currentTranslations = defaultTranslations;
             }
         }
 
-        private static void VerifyAndUpdateLanguageFiles()
+        public static string GetTraduction(string key)
         {
-            var assembly = Assembly.GetExecutingAssembly();
-            
-            foreach (var type in assembly.GetTypes())
-            {
-                if (type.Namespace == "SmartManager.Manager.Langue" && type.IsClass)
-                {
-                    var embeddedTranslations = type.GetField("Translations")?.GetValue(null) as Dictionary<string, string>;
-                    if (embeddedTranslations != null)
-                    {
-                        string languageCode = type.Name.ToLower();
-                        string filePath = Path.Combine(LangueFolder, $"{languageCode}.json");
-                        
-                        if (File.Exists(filePath))
-                        {
-                            string json = File.ReadAllText(filePath);
-                            var existingTranslations = JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
+            if (currentTranslations.TryGetValue(key, out var value))
+                return value;
 
-                            if (IsTranslationDifferent(embeddedTranslations, existingTranslations))
-                            {
-                                UpdateLanguageFile(filePath, embeddedTranslations);
-                                Debug.Log($"[SmartManager] Fichier de langue mis à jour : {languageCode}.json");
-                            }
-                        }
-                        else
-                        {
-                            UpdateLanguageFile(filePath, embeddedTranslations);
-                            Debug.Log($"[SmartManager] Nouveau fichier de langue créé : {languageCode}.json");
-                        }
-                    }
-                }
-            }
-        }
+            if (defaultTranslations.TryGetValue(key, out value))
+                return value;
 
-        private static bool IsTranslationDifferent(Dictionary<string, string> embedded, Dictionary<string, string> existing)
-        {
-            if (embedded.Count != existing.Count) return true;
-
-            foreach (var kvp in embedded)
-            {
-                if (!existing.TryGetValue(kvp.Key, out string value) || value != kvp.Value)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static void UpdateLanguageFile(string filePath, Dictionary<string, string> translations)
-        {
-            string json = JsonConvert.SerializeObject(translations, Formatting.Indented);
-            File.WriteAllText(filePath, json);
-        }
-
-        private static Dictionary<string, string> LoadEmbeddedTranslations(string lang)
-        {
-            var type = Type.GetType($"SmartManager.Manager.Langue.{lang}");
-            return type?.GetField("Translations")?.GetValue(null) as Dictionary<string, string> ?? new Dictionary<string, string>();
+            Debug.LogWarning($"[SmartManager] Clé de traduction manquante : {key}");
+            return $"!{key}!";
         }
 
         private static void EnsureDirectoryExists(string path)
         {
             if (!Directory.Exists(path)) Directory.CreateDirectory(path);
-        }
-
-        public static string GetTraduction(string key)
-        {
-            if (currentTranslations != null && currentTranslations.TryGetValue(key, out string value))
-            {
-                return value;
-            }
-            
-            Debug.LogWarning($"[SmartManager] Clé de traduction manquante : {key}");
-            return key;
         }
     }
 }
